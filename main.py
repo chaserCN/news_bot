@@ -11,6 +11,7 @@ Importance levels (mapped to chart terms in the iOS app):
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -299,7 +300,7 @@ async def fetch_news() -> list[dict]:
         event_date = pub_date[:19] if pub_date else datetime.now(timezone.utc).isoformat()
 
         candidates.append({
-            "id": f"news-{hash(title) & 0xFFFFFFFF:08x}",
+            "id": f"news-{hashlib.md5(title.encode()).hexdigest()[:8]}",
             "date": event_date,
             "title": title.strip(),
             "description": description.strip(),
