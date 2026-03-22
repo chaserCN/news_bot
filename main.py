@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,8 +34,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Bitcoin Events Bot")
 scheduler = AsyncIOScheduler()
 
-EVENTS_FILE = Path("events.json")
-SEEN_FILE = Path("seen_ids.json")
+DB_PATH = Path("events.db")
 NEWS_BASE_URL = "https://cryptocurrency.cv/api"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-2.0-flash"]
@@ -51,20 +51,30 @@ TRUSTED_SOURCES = {
     "cryptoslate", "cryptonews", "cryptopotato",
 }
 
-def load_seen_ids() -> set[str]:
-    """Load set of already-processed article IDs."""
-    if SEEN_FILE.exists():
-        try:
-            return set(json.loads(SEEN_FILE.read_text()))
-        except Exception:
-            pass
-    return set()
 
-
-def save_seen_ids(seen: set[str]):
-    """Persist seen IDs. Keep last 2000 to avoid unbounded growth."""
-    trimmed = sorted(seen)[-2000:]
-    SEEN_FILE.write_text(json.dumps(trimmed))
+def get_db() -> sqlite3.Connection:
+    """Get SQLite connection, creating tables if needed."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        date TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        link TEXT DEFAULT '',
+        kind TEXT DEFAULT 'event',
+        source TEXT DEFAULT '',
+        importance TEXT DEFAULT 'low',
+        label TEXT DEFAULT 'Event',
+        score INTEGER DEFAULT 5
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS seen (
+        id TEXT PRIMARY KEY
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_date ON events(date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_importance ON events(importance)")
+    conn.commit()
+    return conn
 
 
 GEMINI_PROMPT = """You are a Bitcoin market event filter for a price chart app.
@@ -184,19 +194,6 @@ async def enrich_descriptions(events: list[dict]) -> list[dict]:
     return list(enriched)
 
 
-def deduplicate_events(events: list[dict]) -> list[dict]:
-    """Remove duplicate events by day + normalized title prefix."""
-    seen: set[str] = set()
-    unique = []
-    for event in events:
-        day = event["date"][:10]
-        title_key = event["title"][:50].lower().strip()
-        key = f"{day}|{title_key}"
-        if key not in seen:
-            seen.add(key)
-            unique.append(event)
-    return unique
-
 
 async def rank_with_gemini(candidates: list[dict]) -> list[dict]:
     """Send all candidates to Gemini, return only significant ones with importance."""
@@ -304,7 +301,7 @@ async def fetch_news() -> list[dict]:
 
 
 async def refresh_events():
-    """Scheduled job: fetch news, rank with Gemini, merge, save."""
+    """Scheduled job: fetch news, rank with Gemini, insert new events."""
     logger.info("Refreshing events...")
     candidates = await fetch_news()
 
@@ -313,11 +310,14 @@ async def refresh_events():
         return
 
     # Skip already-processed articles
-    seen = load_seen_ids()
+    db = get_db()
+    seen_rows = db.execute("SELECT id FROM seen").fetchall()
+    seen = {r["id"] for r in seen_rows}
     new_candidates = [c for c in candidates if c["id"] not in seen]
     logger.info(f"{len(new_candidates)} new candidates ({len(candidates) - len(new_candidates)} already seen)")
 
     if not new_candidates:
+        db.close()
         return
 
     new_events = await rank_with_gemini(new_candidates)
@@ -327,26 +327,29 @@ async def refresh_events():
         new_events = await enrich_descriptions(new_events)
         logger.info("Description enrichment complete")
 
-    # Mark all candidates as seen (not just selected ones)
-    seen.update(c["id"] for c in new_candidates)
-    save_seen_ids(seen)
+    # Mark all candidates as seen
+    db.executemany("INSERT OR IGNORE INTO seen (id) VALUES (?)",
+                   [(c["id"],) for c in new_candidates])
 
-    # Load existing
-    existing = []
-    if EVENTS_FILE.exists():
-        try:
-            existing = json.loads(EVENTS_FILE.read_text())
-        except Exception:
-            existing = []
+    # Insert new events
+    for e in new_events:
+        db.execute("""INSERT OR IGNORE INTO events
+            (id, date, title, description, link, kind, source, importance, label, score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (e["id"], e["date"], e["title"], e.get("description", ""),
+             e.get("link", ""), e.get("kind", "event"), e.get("source", ""),
+             e["importance"], e["label"], e.get("score", 5)))
 
-    all_events = new_events + existing
-    all_events = deduplicate_events(all_events)
-    importance_order = {"high": 0, "medium": 1, "low": 2}
-    all_events.sort(key=lambda e: (e["date"], -importance_order.get(e.get("importance", "low"), 2), -e.get("score", 5)), reverse=True)
-    all_events = all_events[:200]
+    # Trim old events — keep last 500
+    db.execute("""DELETE FROM events WHERE id NOT IN
+        (SELECT id FROM events ORDER BY date DESC LIMIT 500)""")
+    # Trim seen — keep last 5000
+    db.execute("""DELETE FROM seen WHERE rowid NOT IN
+        (SELECT rowid FROM seen ORDER BY rowid DESC LIMIT 5000)""")
 
-    EVENTS_FILE.write_text(json.dumps(all_events, indent=2, ensure_ascii=False))
-    logger.info(f"Total {len(all_events)} events saved")
+    db.commit()
+    db.close()
+    logger.info(f"Inserted {len(new_events)} new events")
 
 
 # --- HTTP Endpoints ---
@@ -357,17 +360,27 @@ async def health():
 
 
 @app.get("/events")
-async def get_events(importance: str | None = None):
-    """Return cached events. Optional filter: ?importance=high or ?importance=high,medium"""
-    if not EVENTS_FILE.exists():
-        return JSONResponse(content=[], headers={"Cache-Control": "public, max-age=300"})
-
-    events = json.loads(EVENTS_FILE.read_text())
+async def get_events(importance: str | None = None, min_score: int = 0, limit: int = 100):
+    """Return events. Filters: ?importance=high,medium&min_score=5&limit=50"""
+    db = get_db()
 
     if importance:
-        allowed = {s.strip() for s in importance.split(",")}
-        events = [e for e in events if e.get("importance", "medium") in allowed]
+        levels = [s.strip() for s in importance.split(",")]
+        placeholders = ",".join("?" * len(levels))
+        rows = db.execute(
+            f"""SELECT * FROM events
+                WHERE importance IN ({placeholders}) AND score >= ?
+                ORDER BY date DESC LIMIT ?""",
+            (*levels, min_score, limit),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM events WHERE score >= ? ORDER BY date DESC LIMIT ?",
+            (min_score, limit),
+        ).fetchall()
 
+    db.close()
+    events = [dict(r) for r in rows]
     return JSONResponse(
         content=events,
         headers={"Cache-Control": "public, max-age=300"},
@@ -378,9 +391,9 @@ async def get_events(importance: str | None = None):
 async def manual_refresh():
     """Trigger a manual refresh (for testing)."""
     await refresh_events()
-    count = 0
-    if EVENTS_FILE.exists():
-        count = len(json.loads(EVENTS_FILE.read_text()))
+    db = get_db()
+    count = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    db.close()
     return {"status": "refreshed", "event_count": count}
 
 

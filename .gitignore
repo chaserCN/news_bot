@@ -1,6 +1,5 @@
 __pycache__/
 *.pyc
 .env
-events.json
-seen_ids.json
+*.db
 .venv/
