@@ -137,18 +137,30 @@ def extract_text_from_html(html: str) -> str:
 
 
 async def fetch_article_text(url: str) -> str | None:
-    """Fetch article page using curl_cffi to bypass Cloudflare."""
+    """Fetch article text. Tries direct, then Google Cache as fallback."""
     if not url:
         return None
-    try:
-        from curl_cffi.requests import AsyncSession
-        async with AsyncSession() as s:
-            resp = await s.get(url, impersonate="chrome", timeout=15, allow_redirects=True)
-            resp.raise_for_status()
-            return extract_text_from_html(resp.text)
-    except Exception as e:
-        logger.warning(f"Failed to fetch article {url[:60]}: {e}")
-        return None
+
+    attempts = [
+        ("direct", url),
+        ("cache", f"https://webcache.googleusercontent.com/search?q=cache:{url}"),
+    ]
+
+    for label, target in attempts:
+        try:
+            from curl_cffi.requests import AsyncSession
+            async with AsyncSession() as s:
+                resp = await s.get(target, impersonate="chrome", timeout=15, allow_redirects=True)
+                resp.raise_for_status()
+                text = extract_text_from_html(resp.text)
+                if text and len(text) > 200:
+                    logger.info(f"Fetched article ({label}): {url[:60]}")
+                    return text
+        except Exception as e:
+            logger.warning(f"Fetch failed ({label}): {url[:60]}: {e}")
+            continue
+
+    return None
 
 
 async def enrich_descriptions(events: list[dict]) -> list[dict]:
