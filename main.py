@@ -406,6 +406,22 @@ async def manual_refresh():
     return {"status": "refreshed", "event_count": count}
 
 
+@app.post("/reset")
+async def reset_db():
+    """Wipe all data and re-fetch from scratch."""
+    db = get_db()
+    db.execute("DELETE FROM events")
+    db.execute("DELETE FROM seen")
+    db.commit()
+    db.close()
+    logger.info("Database reset")
+    await refresh_events()
+    db = get_db()
+    count = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    db.close()
+    return {"status": "reset", "event_count": count}
+
+
 # --- Startup ---
 
 @app.on_event("startup")
