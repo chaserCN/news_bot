@@ -410,17 +410,6 @@ async def manual_refresh():
 
 @app.on_event("startup")
 async def startup():
-    # One-time cleanup: remove duplicates by title+date (from old hash() bug)
-    db = get_db()
-    deleted = db.execute("""DELETE FROM events WHERE rowid NOT IN (
-        SELECT MIN(rowid) FROM events GROUP BY title, date
-    )""").rowcount
-    if deleted:
-        logger.info(f"Cleaned up {deleted} duplicate events")
-    db.execute("DELETE FROM seen")  # Reset seen — new IDs from md5
-    db.commit()
-    db.close()
-
     await refresh_events()
 
     scheduler.add_job(refresh_events, "interval", hours=1)
