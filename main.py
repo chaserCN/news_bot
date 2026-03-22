@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Bitcoin Events Bot")
 scheduler = AsyncIOScheduler()
 
-DB_PATH = Path("events.db")
+DB_PATH = Path(os.environ.get("DATA_DIR", ".")) / "events.db"
 NEWS_BASE_URL = "https://cryptocurrency.cv/api"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-2.0-flash"]
