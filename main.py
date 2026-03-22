@@ -167,11 +167,15 @@ async def enrich_descriptions(events: list[dict]) -> list[dict]:
 
     async def enrich_one(event: dict) -> dict:
         article_text = await fetch_article_text(event.get("link", ""))
-        if not article_text:
+        if article_text:
+            logger.info(f"Fetched article: {event['title'][:60]}")
+        else:
             # Fallback: use API description snippet
             article_text = event.get("description", "")
             if not article_text:
+                logger.warning(f"No text available: {event['title'][:60]}")
                 return event
+            logger.info(f"Using API description (fallback): {event['title'][:60]}")
 
         prompt = DESCRIPTION_PROMPT.replace("{title}", event["title"]).replace("{article_text}", article_text)
 
