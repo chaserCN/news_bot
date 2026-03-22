@@ -139,9 +139,14 @@ async def fetch_article_text(url: str) -> str | None:
     """Fetch article page and extract text content."""
     if not url:
         return None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; BitcoinEventsBot/1.0)"})
+            resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             return extract_text_from_html(resp.text)
     except Exception as e:
@@ -163,7 +168,10 @@ async def enrich_descriptions(events: list[dict]) -> list[dict]:
     async def enrich_one(event: dict) -> dict:
         article_text = await fetch_article_text(event.get("link", ""))
         if not article_text:
-            return event  # keep original description
+            # Fallback: use API description snippet
+            article_text = event.get("description", "")
+            if not article_text:
+                return event
 
         prompt = DESCRIPTION_PROMPT.replace("{title}", event["title"]).replace("{article_text}", article_text)
 
