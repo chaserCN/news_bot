@@ -137,17 +137,13 @@ def extract_text_from_html(html: str) -> str:
 
 
 async def fetch_article_text(url: str) -> str | None:
-    """Fetch article page and extract text content."""
+    """Fetch article page using curl_cffi to bypass Cloudflare."""
     if not url:
         return None
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(url, headers=headers)
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession() as s:
+            resp = await s.get(url, impersonate="chrome", timeout=15, allow_redirects=True)
             resp.raise_for_status()
             return extract_text_from_html(resp.text)
     except Exception as e:
