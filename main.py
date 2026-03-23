@@ -137,13 +137,21 @@ def extract_text_from_html(html: str) -> str:
 
 
 async def fetch_article_text(url: str) -> str | None:
-    """Fetch article text via curl_cffi (Chrome TLS impersonation)."""
+    """Fetch article text via plain httpx (no TLS impersonation)."""
     if not url:
         return None
     try:
-        from curl_cffi.requests import AsyncSession
-        async with AsyncSession() as s:
-            resp = await s.get(url, impersonate="chrome", timeout=15, allow_redirects=True)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        async with httpx.AsyncClient(
+            timeout=15,
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            resp = await client.get(url)
             resp.raise_for_status()
             text = extract_text_from_html(resp.text)
             if text and len(text) > 200:
